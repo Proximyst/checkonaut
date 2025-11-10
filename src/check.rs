@@ -121,41 +121,6 @@ fn find_files(
         })
 }
 
-// serde_json::Value is a good middle-ground for generic data representation that I can later map
-// to Lua.
-fn parse_documents(path: impl AsRef<Path>, lua: &Lua) -> Result<Vec<serde_json::Value>> {
-    let path = path.as_ref();
-    let contents = std::fs::read(path).wrap_err("failed to read file")?;
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("json") => {
-            let value: serde_json::Value =
-                serde_json::from_slice(&contents).wrap_err("failed to parse JSON")?;
-            Ok(vec![value])
-        }
-        Some("yml") | Some("yaml") => {
-            // To get all documents out, we need a Deserializer.
-            // We can't just parse to a Vec<serde_json::Value> directly.
-            let mut deserializer = serde_norway::Deserializer::from_slice(&contents);
-            let mut values = Vec::with_capacity(1);
-            while let Some(de) = deserializer.next() {
-                values.push(
-                    serde_json::Value::deserialize(de).wrap_err("failed to parse YAML document")?,
-                );
-            }
-            Ok(values)
-        }
-        Some("toml") => {
-            let value: serde_json::Value =
-                toml::from_slice(&contents).wrap_err("failed to parse TOML")?;
-            Ok(vec![value])
-        }
-        _ => bail!(
-            "unrecognised file extension for file {}",
-            path.to_string_lossy(),
-        ),
-    }
-}
-
 fn check_file(
     file: impl AsRef<Path>,
     checks: &[PathBuf],
