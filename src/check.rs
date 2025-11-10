@@ -43,7 +43,14 @@ impl Check {
                         .and_then(|n| n.to_str())
                         .map_or(false, |n| n.ends_with("_test.lua"))
                 {
-                    lua_files.push(file);
+                    if has_check_function(&file).wrap_err_with(|| {
+                        format!(
+                            "checking Lua file for Check function: {}",
+                            file.to_string_lossy()
+                        )
+                    })? {
+                        lua_files.push(file);
+                    }
                 } else {
                     data_files.push(file);
                 }
@@ -324,5 +331,21 @@ impl FromLua for CheckResult {
                 message: Some("expected string or table".into()),
             }),
         }
+    }
+}
+
+fn has_check_function(file: impl AsRef<Path>) -> Result<bool> {
+    let file = file.as_ref();
+    let lua = Lua::new();
+    let check_contents = std::fs::read_to_string(file).wrap_err("failed to read check file")?;
+    lua.load(&check_contents)
+        .set_name(format!("@{}", &file.to_string_lossy()))
+        .exec()
+        .map_err(|e| eyre!("failed to load check Lua script: {e}"))?;
+
+    match lua.globals().get::<mlua::Function>("Check") {
+        Ok(_) => Ok(true),
+        Err(mlua::Error::FromLuaConversionError { .. }) => Ok(false),
+        Err(e) => Err(eyre!("failed to get 'Check' function from Lua script: {e}")),
     }
 }
