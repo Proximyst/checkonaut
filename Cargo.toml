@@ -1,0 +1,26 @@
+[package]
+name = "checkonaut"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+clap = { version = "4.5.51", features = ["cargo", "derive", "env"] }
+color-eyre = "0.6.5"
+eyre = "0.6.12"
+mlua = { version = "0.11.4", features = ["lua54"] }
+rayon = "1.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+toml = "0.9.8"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+
+[lib]
+name = "checkonaut"
+path = "src/lib.rs"
+
+[[bin]]
+name = "checkonaut"
+path = "src/main.rs"
