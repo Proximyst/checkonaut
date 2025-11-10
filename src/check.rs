@@ -4,7 +4,7 @@ use mlua::{FromLua, Function, Lua, LuaSerdeExt};
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Args)]
 pub struct Check {
@@ -100,6 +100,7 @@ impl Check {
             }
         }
         ensure!(!found_error, "one or more errors were found during checks");
+        info!("no errors found");
         Ok(())
     }
 }
@@ -133,7 +134,28 @@ fn check_file(
     checks: &[PathBuf],
 ) -> Result<Vec<(PathBuf, Vec<CheckError>)>> {
     let file = file.as_ref();
+    let path_str = file
+        .to_str()
+        .ok_or_else(|| eyre!("invalid UTF-8 in path: {}", file.to_string_lossy()))?;
+    let parent_str = match file.parent() {
+        None => "/",
+        Some(p) => p
+            .to_str()
+            .ok_or_else(|| eyre!("invalid UTF-8 in path: {}", file.to_string_lossy()))?,
+    };
+
+    // TODO: DRY the lua init
     let lua = Lua::new();
+    lua.globals()
+        .set("_CHECK_FILE", path_str)
+        .map_err(|e| eyre!("failed to set _CHECK_FILE global: {e}"))?;
+    lua.globals()
+        .set("_CHECK_DIR", parent_str)
+        .map_err(|e| eyre!("failed to set _CHECK_DIR global: {e}"))?;
+    lua.load(r#"package.path = package.path .. ";" .. _CHECK_DIR .. "/?.lua;" .. _CHECK_DIR .. "/?/init.lua" "#)
+        .exec()
+        .map_err(|e| eyre!("failed to set package.path: {e}"))?;
+
     let documents = {
         let data = std::fs::read(&file).wrap_err("failed to read data file")?;
         let ext = file.extension().and_then(|e| e.to_str());
@@ -187,8 +209,6 @@ fn check_file(
             .exec()
             .map_err(|e| eyre!("failed to load check Lua script: {e}"))?;
 
-        // TODO: It'd be handy to include a smart hint about other globals that match "Check"
-        // case-sensitively but aren't the match we're looking for?
         let check_function: Function = lua
             .globals()
             .get("Check")
@@ -264,6 +284,7 @@ impl CheckResult {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // we use Debug to print this
 struct CheckError {
     severity: CheckSeverity,
     error: String,
