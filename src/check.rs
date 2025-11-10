@@ -38,11 +38,14 @@ impl Check {
                     .extension()
                     .and_then(|e| e.to_str())
                     .map_or(false, |s| s.eq_ignore_ascii_case("lua"))
-                    && !file
+                {
+                    if file
                         .file_name()
                         .and_then(|n| n.to_str())
                         .map_or(false, |n| n.ends_with("_test.lua"))
-                {
+                    {
+                        continue;
+                    }
                     if has_check_function(&file).wrap_err_with(|| {
                         format!(
                             "checking Lua file for Check function: {}",

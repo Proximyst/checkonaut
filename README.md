@@ -42,11 +42,12 @@ end
 ```
 
 And likewise, you can test that this will work with unit tests. This is done via
-`_test.lua` files, where all functions starting with `Test` are run. The `Check`
-function is implicitly required here, so you don't need to `require` it. For
-example:
+`_test.lua` files, where all functions starting with `Test` are run. You must
+`require` the check yourself. For example:
 
 ```lua
+require("mycheckfilename")
+
 function TestNonKubernetesObject()
   local res = Check({ key = "Value" })
   assert(res == nil)
@@ -86,26 +87,3 @@ function Check(obj)
   return issues
 end
 ```
-
-Check is actually also called with _two_ parameters, if it asks for it: one is
-the raw object, and the other is a context object, containing metadata about the
-invocation:
-
-```lua
-Check(
-  {}, -- The decoded table of the file.
-  {
-    file = {
-      path = "/absolute/path/to/file.yaml", -- This is from the root of the system.
-      -- More details may be added in the future.
-    },
-    check = {
-      path = "/absolute/path/to/check.lua", -- The check file being executed.
-      -- More details may be added in the future.
-    },
-  }, -- Context; may be nil if you don't pass it in inside your Test functions!
-)
-```
-
-The context can be useful if you require a way to add exceptions while a check is
-in the works of being implemented.
