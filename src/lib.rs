@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use eyre::Result;
+use eyre::{Context, Result};
 
 mod check;
 mod test;
@@ -11,6 +11,11 @@ pub struct Cli {
     /// The logger configuration.
     #[arg(long, env = "RUST_LOG")]
     pub logger: Option<String>,
+
+    /// How many threads should Rayon use in processing?
+    /// By default, this is the same amount as CPUs available.
+    #[arg(long)]
+    rayon_threads: Option<usize>,
 
     #[command(subcommand)]
     command: Command,
@@ -27,6 +32,13 @@ enum Command {
 
 impl Cli {
     pub fn run(self) -> Result<()> {
+        if let Some(n) = self.rayon_threads {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build_global()
+                .wrap_err("failed to set up Rayon thread pool")?;
+        }
+
         match self.command {
             Command::Check(cmd) => cmd.run()?,
             Command::Test(cmd) => cmd.run()?,

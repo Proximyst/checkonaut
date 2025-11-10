@@ -1,130 +1,363 @@
 use clap::Args;
-use eyre::{Context, Result, ensure};
+use eyre::{Context, Result, bail, ensure, eyre};
+use mlua::{FromLua, Function, Lua, LuaSerdeExt};
+use rayon::prelude::*;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use tracing::trace;
+use tracing::{error, warn};
 
 #[derive(Debug, Args)]
 pub struct Check {
-    /// The data files or directories to check.
+    /// The data files or directories to check with.
     ///
-    /// If given a directory, all recognisable files within the directory will be checked against
-    /// all checks. Recognisable files are those with the extensions `.json`, `.yml`, `.yaml`, or
-    /// `.toml`.
+    /// Data files are files with the extensions `.json`, `.yml`, `.yaml`, or `.toml`.
+    /// Check files are files with the extension `.lua`. `_test.lua` files are ignored.
+    ///
+    /// Files starting with a period (`.`) are ignored by default.
     #[arg(default_value = ".")]
     input: Vec<PathBuf>,
 
-    /// All check files or directories to run with.
-    ///
-    /// If given a directory, all Lua check files within the directory will be run.
-    /// Note that `_test.lua` files are ignored in directory scans. Likewise, Lua files that
-    /// do not expose a `Check` function are also ignored.
-    #[arg(short, long, default_value = ".")]
-    checks: Vec<PathBuf>,
-
-    /// Act recursively when given directories as input or checks.
-    #[arg(short, long)]
-    recursive: bool,
-
-    /// Do we want to process .dotfiles and .dotfolders?
+    /// Enable processing of files starting with a period.
     #[arg(long)]
     dotfiles: bool,
 }
 
 impl Check {
     pub fn run(self) -> Result<()> {
-        // TODO: Support streaming paths instead, to reduce bulk memory usage when given
-        // millions/billions of files.
-        let mut data_files = Vec::new();
-        for file in &self.input {
-            data_files.extend(
-                find_data_files(file, self.recursive, self.dotfiles).wrap_err_with(|| {
-                    format!(
-                        "listing data files in {} (recursive={})",
-                        file.to_string_lossy(),
-                        self.recursive,
-                    )
-                })?,
-            );
+        let input_files = self
+            .input
+            .into_par_iter()
+            .flat_map(|p| find_files(p, self.dotfiles))
+            // TODO: Make an option to not collect all into memory at once...
+            .collect::<Result<Vec<_>>>()?;
+        let (lua_files, data_files) = {
+            let mut lua_files = Vec::new();
+            let mut data_files = Vec::new();
+            for file in input_files {
+                if file
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map_or(false, |s| s.eq_ignore_ascii_case("lua"))
+                    && !file
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map_or(false, |n| n.ends_with("_test.lua"))
+                {
+                    lua_files.push(file);
+                } else {
+                    data_files.push(file);
+                }
+            }
+            (lua_files, data_files)
+        };
+
+        ensure!(lua_files.len() > 0, "no check files found to run");
+        ensure!(data_files.len() > 0, "no data files found to check");
+        // We now have all the Lua files (i.e. checks) and all the data files we want to run on.
+
+        #[derive(Debug, Clone)]
+        struct EvalResult {
+            data_file: PathBuf,
+            /// The errors in a tuple of `(check_file, errors)`.
+            /// If no errors are found for a check, it won't be included.
+            errors: Vec<(PathBuf, Vec<CheckError>)>,
         }
-        println!("found {} data files to check", data_files.len());
-
-        // Figure out how many bytes total
-        use rayon::prelude::*;
-        let sz = data_files
-            .par_iter()
-            .map(|path| {
-                let metadata = std::fs::metadata(path).wrap_err_with(|| {
-                    format!("could not get metadata for file {}", path.to_string_lossy())
-                })?;
-                Ok::<u64, eyre::Report>(metadata.len())
+        let mut results: Vec<EvalResult> = data_files
+            .into_par_iter()
+            .map(|file| {
+                let f2 = file.clone();
+                Ok(EvalResult {
+                    errors: check_file(file, &lua_files).wrap_err_with(|| {
+                        format!("checking data file: {}", f2.to_string_lossy())
+                    })?,
+                    data_file: f2,
+                })
             })
-            .try_reduce(|| 0u64, |a, b| Ok(a + b))
-            .wrap_err("failed to sum data file sizes")?;
-        println!("total size of data files: {} bytes", sz);
-
+            .collect::<Result<Vec<EvalResult>>>()?;
+        results.sort_unstable_by_key(|e| e.data_file.clone());
+        let mut found_error = false;
+        for res in results {
+            let path = res.data_file.to_string_lossy();
+            for (check, errs) in res.errors {
+                let (errors, warnings) = errs
+                    .iter()
+                    .partition::<Vec<_>, _>(|e| e.severity == CheckSeverity::Error);
+                found_error |= !errors.is_empty();
+                let check = check.to_string_lossy();
+                if !errors.is_empty() {
+                    error!(%path, count = errors.len(), ?errors, %check, "errors found by check");
+                }
+                if !warnings.is_empty() {
+                    warn!(%path, count = warnings.len(), ?warnings, %check, "warnings found by check");
+                }
+            }
+        }
+        ensure!(!found_error, "one or more errors were found during checks");
         Ok(())
     }
 }
 
-fn find_data_files(path: &Path, recursive: bool, dotfiles: bool) -> Result<Vec<PathBuf>> {
-    if path.is_file() {
-        return Ok(vec![path.into()]);
-    } else {
-        ensure!(
-            path.is_dir(),
-            "path ({}) is neither a file nor a directory",
+fn find_files(
+    path: impl AsRef<Path>,
+    dotfiles: bool,
+) -> impl ParallelIterator<Item = Result<PathBuf>> {
+    walkdir::WalkDir::new(path)
+        .min_depth(1) // don't return the root itself
+        .into_iter()
+        .par_bridge()
+        .filter_map(move |entry| match entry {
+            Ok(entry) => {
+                if !dotfiles && entry.file_name().to_string_lossy().starts_with('.') {
+                    None
+                } else if entry.file_type().is_file() {
+                    Some(Ok(entry.path().to_path_buf()))
+                } else {
+                    // we get notified of directories too, so let's just skip 'em
+                    None
+                }
+            }
+
+            Err(err) => Some(Err(err.into())),
+        })
+}
+
+// serde_json::Value is a good middle-ground for generic data representation that I can later map
+// to Lua.
+fn parse_documents(path: impl AsRef<Path>, lua: &Lua) -> Result<Vec<serde_json::Value>> {
+    let path = path.as_ref();
+    let contents = std::fs::read(path).wrap_err("failed to read file")?;
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("json") => {
+            let value: serde_json::Value =
+                serde_json::from_slice(&contents).wrap_err("failed to parse JSON")?;
+            Ok(vec![value])
+        }
+        Some("yml") | Some("yaml") => {
+            // To get all documents out, we need a Deserializer.
+            // We can't just parse to a Vec<serde_json::Value> directly.
+            let mut deserializer = serde_norway::Deserializer::from_slice(&contents);
+            let mut values = Vec::with_capacity(1);
+            while let Some(de) = deserializer.next() {
+                values.push(
+                    serde_json::Value::deserialize(de).wrap_err("failed to parse YAML document")?,
+                );
+            }
+            Ok(values)
+        }
+        Some("toml") => {
+            let value: serde_json::Value =
+                toml::from_slice(&contents).wrap_err("failed to parse TOML")?;
+            Ok(vec![value])
+        }
+        _ => bail!(
+            "unrecognised file extension for file {}",
             path.to_string_lossy(),
-        );
+        ),
+    }
+}
+
+fn check_file(
+    file: impl AsRef<Path>,
+    checks: &[PathBuf],
+) -> Result<Vec<(PathBuf, Vec<CheckError>)>> {
+    let file = file.as_ref();
+    let lua = Lua::new();
+    let documents = {
+        let data = std::fs::read(&file).wrap_err("failed to read data file")?;
+        let ext = file.extension().and_then(|e| e.to_str());
+        if ext.map_or(false, |s| s.eq_ignore_ascii_case("json")) {
+            // We have a simple JSON document: there is only 1 document per file.
+            let value: serde_json::Value =
+                serde_json::from_slice(&data).wrap_err("failed to parse JSON")?;
+            let value = lua
+                .to_value(&value)
+                .map_err(|e| eyre!("failed to serialize JSON to Lua value: {e}"))
+                .wrap_err("failed to convert JSON to Lua value")?;
+            vec![value]
+        } else if ext.map_or(false, |s| s.eq_ignore_ascii_case("toml")) {
+            // We have a simple TOML document: there is only 1 document per file.
+            let value: serde_json::Value =
+                toml::from_slice(&data).wrap_err("failed to parse TOML")?;
+            let value = lua
+                .to_value(&value)
+                .map_err(|e| eyre!("failed to serialize TOML to Lua value: {e}"))
+                .wrap_err("failed to convert TOML to Lua value")?;
+            vec![value]
+        } else if ext.map_or(false, |s| {
+            s.eq_ignore_ascii_case("yml") || s.eq_ignore_ascii_case("yaml")
+        }) {
+            // We may have multiple YAML documents in a single file.
+            let mut deserializer = serde_norway::Deserializer::from_slice(&data);
+            let mut values = Vec::with_capacity(1);
+            while let Some(de) = deserializer.next() {
+                let value: serde_json::Value =
+                    serde_json::Value::deserialize(de).wrap_err("failed to parse YAML document")?;
+                let value = lua
+                    .to_value(&value)
+                    .map_err(|e| eyre!("failed to serialize YAML to Lua value: {e}"))
+                    .wrap_err("failed to convert YAML to Lua value")?;
+                values.push(value);
+            }
+            values
+        } else {
+            bail!(
+                "unrecognised file extension for file {}",
+                file.to_string_lossy(),
+            );
+        }
+    };
+
+    fn perform_check(lua: Lua, documents: &[mlua::Value], check: &Path) -> Result<Vec<CheckError>> {
+        let check_contents =
+            std::fs::read_to_string(check).wrap_err("failed to read check file")?;
+        lua.load(&check_contents)
+            .set_name(format!("@{}", &check.to_string_lossy()))
+            .exec()
+            .map_err(|e| eyre!("failed to load check Lua script: {e}"))?;
+
+        // TODO: It'd be handy to include a smart hint about other globals that match "Check"
+        // case-sensitively but aren't the match we're looking for?
+        let check_function: Function = lua
+            .globals()
+            .get("Check")
+            .map_err(|e| eyre!("failed to get 'Check' function from Lua script: {e}"))?;
+        let mut errors = Vec::new();
+        for doc in documents {
+            let res: CheckResult = check_function
+                .call(doc)
+                .map_err(|e| eyre!("failed to execute 'Check' function: {e}"))?;
+            errors.extend(res.flatten());
+        }
+
+        Ok(errors)
     }
 
-    use rayon::prelude::*;
+    let mut results = Vec::new();
+    // TODO: Test with parallelism of checks as well?
+    for check in checks {
+        let res = perform_check(lua.clone(), &documents, check)
+            .wrap_err_with(|| format!("failed to run check: {}", check.to_string_lossy()))?;
+        if !res.is_empty() {
+            results.push((check.clone(), res));
+        }
+    }
 
-    std::fs::read_dir(path)
-        .wrap_err_with(|| format!("could not read directory ({})", path.to_string_lossy()))?
-        .par_bridge()
-        .try_fold(Vec::new, |mut files, entry| {
-            let entry = entry.wrap_err_with(|| {
-                format!(
-                    "could not read directory entry in {}",
-                    path.to_string_lossy()
-                )
-            })?;
-            let entry_path = entry.path();
-            if !dotfiles
-                && entry_path
-                    .file_name()
-                    .map_or(false, |n| n.to_string_lossy().starts_with('.'))
-            {
-                trace!(
-                    ?path,
-                    ?entry_path,
-                    "ignoring dotfile or dotfolder as per configuration",
-                );
-                return Ok(files);
-            }
+    Ok(results)
+}
 
-            if entry_path.is_file() {
-                if let Some(ext) = entry_path.extension() {
-                    if ext == "json" || ext == "yml" || ext == "yaml" || ext == "toml" {
-                        files.push(entry_path);
-                    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckSeverity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone)]
+enum CheckResult {
+    /// Nil represents a result to be ignored.
+    Nil,
+    /// A single error result.
+    Error {
+        severity: Option<CheckSeverity>,
+        error: String,
+    },
+    /// A wrapper around multiple error results (or potentially nils).
+    Many {
+        severity: Option<CheckSeverity>,
+        results: Vec<CheckResult>,
+    },
+}
+
+impl CheckResult {
+    fn flatten(self) -> Vec<CheckError> {
+        let mut acc = Vec::new();
+        self.flatten_internal(&mut acc, CheckSeverity::Error);
+        acc
+    }
+
+    fn flatten_internal(self, acc: &mut Vec<CheckError>, inherited_severity: CheckSeverity) {
+        match self {
+            Self::Nil => {}
+            Self::Error { severity, error } => acc.push(CheckError {
+                severity: severity.unwrap_or(inherited_severity),
+                error,
+            }),
+            Self::Many { severity, results } => {
+                let severity = severity.unwrap_or(inherited_severity);
+                for result in results {
+                    result.flatten_internal(acc, severity);
                 }
-                Ok::<Vec<PathBuf>, eyre::Report>(files)
-            } else if recursive && entry_path.is_dir() {
-                let mut new_files = files;
-                new_files.extend(find_data_files(&entry_path, recursive, dotfiles)?);
-                Ok(new_files)
-            } else {
-                trace!(
-                    ?path,
-                    ?entry_path,
-                    "ignoring data directory because we are not recursively iterating"
-                );
-                Ok(files)
             }
-        })
-        .try_reduce(Vec::new, |mut a, mut b| {
-            a.append(&mut b);
-            Ok(a)
-        })
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CheckError {
+    severity: CheckSeverity,
+    error: String,
+}
+
+impl FromLua for CheckResult {
+    fn from_lua(value: mlua::Value, lua: &Lua) -> mlua::Result<Self> {
+        match value {
+            mlua::Value::Nil => Ok(CheckResult::Nil),
+
+            mlua::Value::String(s) => {
+                let error = s.to_str()?.to_string();
+                Ok(CheckResult::Error {
+                    severity: None,
+                    error,
+                })
+            }
+
+            mlua::Value::Table(table) => {
+                // A table can exist for multiple reasons:
+                //   * We can have a sequence of errors (i.e., a vec).
+                //   * We can have a dictionary with a "message" and optionally "severity" (i.e., a
+                //     single error). The message can be either a string, or a vec of strings (or
+                //     even nil).
+
+                if !table.contains_key("message")? {
+                    // If we have no "message" key, we'll assume it's a sequence of errors.
+                    let mut results = Vec::new();
+                    for pair in table.sequence_values::<mlua::Value>() {
+                        let pair = pair?;
+                        match pair {
+                            mlua::Value::Nil => results.push(CheckResult::Nil),
+                            mlua::Value::String(s) => results.push(CheckResult::Error {
+                                severity: None,
+                                error: s.to_str()?.to_string(),
+                            }),
+                            otherwise => results.push(CheckResult::from_lua(otherwise, lua)?),
+                        }
+                    }
+                    Ok(Self::Many {
+                        severity: None,
+                        results,
+                    })
+                } else {
+                    let severity: Option<String> = table.get("severity")?;
+                    let severity = match severity.as_deref() {
+                        None => None,
+                        Some("error") => Some(CheckSeverity::Error),
+                        Some("warning") => Some(CheckSeverity::Warning),
+                        Some(other) => {
+                            return Err(mlua::Error::FromLuaConversionError {
+                                from: "string",
+                                to: "CheckSeverity".into(),
+                                message: Some(format!("invalid severity level: {}", other)),
+                            });
+                        }
+                    };
+                    let error: String = table.get("message")?;
+                    Ok(CheckResult::Error { severity, error })
+                }
+            }
+            _ => Err(mlua::Error::FromLuaConversionError {
+                from: value.type_name(),
+                to: "CheckError".into(),
+                message: Some("expected string or table".into()),
+            }),
+        }
+    }
 }
