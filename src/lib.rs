@@ -187,4 +187,83 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    #[traced_test]
+    fn test_check_receives_document() -> Result<()> {
+        const SCRIPT: &str = r#"
+            function Check(obj)
+                if obj.foo == "bar" then
+                    return { "foo is bar" }
+                end
+                return nil
+            end
+        "#;
+        let dir = test_temp_dir!();
+        fs::write(dir.as_path_untracked().join("script.lua"), SCRIPT)?;
+        fs::write(
+            dir.as_path_untracked().join("data.json"),
+            r#"{"foo": "bar"}"#,
+        )?;
+
+        let cmd = Cli::try_parse_from([
+            "unittest",
+            "check",
+            "--",
+            dir.as_path_untracked()
+                .to_str()
+                .wrap_err("non UTF-8 test dir")?,
+        ])
+        .wrap_err("failed to parse args")?;
+        let res = cmd.run();
+        assert!(res.is_err(), "expected error but got success");
+        assert!(logs_contain("foo is bar"));
+
+        Ok(())
+    }
+
+    #[test]
+    #[traced_test]
+    fn test_check_receives_context() -> Result<()> {
+        const SCRIPT: &str = r#"
+            function Check(_, ctx)
+                local issues = { }
+                if string.find(ctx.check_file, "script.lua", 1, true) then
+                    table.insert(issues, "issue1")
+                end
+                if string.find(ctx.document_file, "data.json", 1, true) then
+                    table.insert(issues, "issue2")
+                end
+                return issues
+            end
+        "#;
+        let dir = test_temp_dir!();
+        fs::write(dir.as_path_untracked().join("script.lua"), SCRIPT)?;
+        fs::write(
+            dir.as_path_untracked().join("data.json"),
+            r#"{"foo": "bar"}"#,
+        )?;
+
+        let cmd = Cli::try_parse_from([
+            "unittest",
+            "check",
+            "--",
+            dir.as_path_untracked()
+                .to_str()
+                .wrap_err("non UTF-8 test dir")?,
+        ])
+        .wrap_err("failed to parse args")?;
+        let res = cmd.run();
+        assert!(res.is_err(), "expected error but got success");
+        assert!(
+            logs_contain("issue1"),
+            "should have indication of finding check_file"
+        );
+        assert!(
+            logs_contain("issue2"),
+            "should have indication of finding document_file"
+        );
+
+        Ok(())
+    }
 }
