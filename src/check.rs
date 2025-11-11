@@ -111,6 +111,7 @@ fn check_file(
 
     fn perform_check(
         lua: Lua,
+        doc_file: &Path,
         documents: &[mlua::Value],
         check: &SourceCode,
     ) -> Result<Vec<CheckError>> {
@@ -121,9 +122,17 @@ fn check_file(
             )
         })?;
 
+        let context = lua
+            .create_table_from([
+                ("check_file", check.path.to_string_lossy()),
+                ("document_file", doc_file.to_string_lossy()),
+            ])
+            .map_err(|e| eyre!("failed to create context table: {e}"))?;
+        let context = mlua::Value::Table(context);
+
         let mut errors = Vec::new();
         for doc in documents {
-            let res = check.call_check_function(&lua, doc, &mlua::Value::Nil)?;
+            let res = check.call_check_function(&lua, doc, &context)?;
             errors.extend(res);
         }
 
@@ -133,7 +142,7 @@ fn check_file(
     let mut results = Vec::new();
     // TODO: Test with parallelism of checks as well?
     for check in checks {
-        let res = perform_check(lua.clone(), &documents, check)
+        let res = perform_check(lua.clone(), file, &documents, check)
             .wrap_err_with(|| format!("failed to run check: {}", check.path.display()))?;
         if !res.is_empty() {
             results.push((check, res));
