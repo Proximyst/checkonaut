@@ -10,6 +10,6 @@ function TestReturnsInvalid()
 	}
 	local result = Check(obj)
 	assert(type(result) == "table", "Expected result to be a table")
-	assert(#result == 1, "Expected exactly one reason for invalidity")
-	assert(result[1] == "object is invalid", "Unexpected reason for invalidity: " .. tostring(result[1]))
+	assert(result["severity"] == "warning", "Unexpected severity: " .. tostring(result["severity"]))
+	assert(result["message"] == "object is invalid", "Unexpected message: " .. tostring(result["message"]))
 end

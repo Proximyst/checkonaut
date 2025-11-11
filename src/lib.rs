@@ -2,6 +2,8 @@ use clap::{Parser, Subcommand};
 use eyre::{Context, Result};
 
 mod check;
+mod file;
+mod lua;
 mod test;
 
 /// A tool for running checks against arbitrary JSON-like data.
