@@ -74,7 +74,6 @@ impl FileSearcher {
         path: PathBuf,
     ) -> impl ParallelIterator<Item = Result<PathBuf, FileSearchError>> {
         walkdir::WalkDir::new(&path)
-            .min_depth(1)
             .follow_links(self.follow_links)
             .into_iter()
             .par_bridge()
