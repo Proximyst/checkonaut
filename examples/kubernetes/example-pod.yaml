@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-pod
+spec:
+  containers:
+    - name: hello
+      image: hello-world:latest
+---
+apiVersion: v1
+kind: Pod
+metadata: {} # No name
+spec:
+  containers:
+    - name: hello
+      image: hello-world:latest
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-pod
+spec:
+  containers: [] # No containers
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-pod
+spec:
+  containers:
+    - name: hello
+      # No image
