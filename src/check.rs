@@ -21,6 +21,12 @@ pub struct Check {
     #[arg(default_value = ".")]
     input: Vec<PathBuf>,
 
+    /// Additional check files or directories to include.
+    ///
+    /// These are not used for data; only check files are considered here.
+    #[arg(short, long, alias("check"))]
+    checks: Vec<PathBuf>,
+
     /// Enable processing of files starting with a period.
     #[arg(long)]
     dotfiles: bool,
@@ -29,7 +35,7 @@ pub struct Check {
 impl Check {
     pub fn run(self) -> Result<()> {
         let FileSearchResult {
-            check_files,
+            mut check_files,
             test_files: _,
             data_files,
         } = FileSearcher::default()
@@ -39,6 +45,20 @@ impl Check {
             .include_data_files(true)
             .search(self.input.into_par_iter())
             .wrap_err("failed to search input paths for relevant files")?;
+        {
+            // Additional check files
+            let FileSearchResult {
+                check_files: mut extra_check_files,
+                test_files: _,
+                data_files: _,
+            } = FileSearcher::default()
+                .include_dotfiles(self.dotfiles)
+                .include_dotdirs(self.dotfiles)
+                .include_check_files(true)
+                .search(self.checks.into_par_iter())
+                .wrap_err("failed to search additional check paths for relevant files")?;
+            check_files.append(&mut extra_check_files);
+        }
 
         let check_files = check_files
             .into_par_iter()

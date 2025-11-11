@@ -4,6 +4,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
 };
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct SourceCode {
@@ -27,6 +28,8 @@ impl SourceCode {
 
     pub fn load_into(&self, to: &Lua) -> Result<()> {
         update_package_path(to, &self.path)?;
+        self.checkonaut_module(to)
+            .wrap_err("failed to load 'checkonaut' module")?;
         to.load(&self.contents)
             .set_name(&self.name)
             .exec()
@@ -41,6 +44,8 @@ impl SourceCode {
 
     pub fn has_check_function(&self) -> Result<bool> {
         let lua = new_lua_for(&self.path)?;
+        self.checkonaut_module(&lua)
+            .wrap_err("failed to load 'checkonaut' module")?;
         self.load_into(&lua)?;
 
         match lua.globals().get::<mlua::Function>("Check") {
@@ -118,6 +123,42 @@ impl SourceCode {
             }
         }
         Ok(results)
+    }
+
+    fn checkonaut_module(&self, lua: &Lua) -> Result<()> {
+        let source_path = self.path.clone();
+
+        let read_json = lua
+            .create_function(move |l, path: mlua::String| {
+                let path_str = path.to_str()?;
+                let parent = source_path.parent().ok_or_else(|| {
+                    mlua::Error::runtime(format!(
+                        "cannot determine parent directory of '{}'",
+                        source_path.display(),
+                    ))
+                })?;
+                let full_path = parent.join(path_str.to_string());
+                let contents = std::fs::read_to_string(&full_path).map_err(|e| {
+                    mlua::Error::runtime(format!("failed to read '{}': {}", full_path.display(), e))
+                })?;
+                let json: serde_json::Value = serde_json::from_str(&contents).map_err(|e| {
+                    mlua::Error::runtime(format!(
+                        "failed to parse JSON in '{}': {}",
+                        full_path.display(),
+                        e
+                    ))
+                })?;
+                let value = l.to_value(&json)?;
+                Ok(value)
+            })
+            .map_err(|e| eyre!("failed to create read_json function: {e}"))?;
+        let module = lua
+            .create_table_from([("ReadJSON", read_json)])
+            .map_err(|e| eyre!("failed to create table for module: {e}"))?;
+        lua.register_module("@checkonaut", module)
+            .map_err(|e| eyre!("failed to register checkonaut module: {e}"))?;
+        debug!("loaded 'checkonaut' module for '{}'", self.path.display());
+        Ok(())
     }
 }
 

@@ -7,7 +7,7 @@ use eyre::{Context, Result, ensure};
 use mlua::Lua;
 use rayon::prelude::*;
 use std::path::PathBuf;
-use tracing::error;
+use tracing::{error, info};
 
 #[derive(Debug, Args)]
 pub struct Test {
@@ -64,6 +64,7 @@ impl Test {
             }
         }
         ensure!(results.is_empty(), "one or more tests failed");
+        info!("no test failures detected");
         Ok(())
     }
 }
