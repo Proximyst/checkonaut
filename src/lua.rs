@@ -152,8 +152,22 @@ impl SourceCode {
                 Ok(value)
             })
             .map_err(|e| eyre!("failed to create read_json function: {e}"))?;
+
+        let matches = lua
+            .create_function(|_, (str, pattern): (mlua::String, mlua::String)| {
+                let regexp = regex::Regex::new(&pattern.to_str()?).map_err(|e| {
+                    mlua::Error::runtime(format!(
+                        "invalid regex pattern '{}': {}",
+                        pattern.display(),
+                        e
+                    ))
+                })?;
+                Ok(regexp.is_match(&str.to_str()?))
+            })
+            .map_err(|e| eyre!("failed to create matches function: {e}"))?;
+
         let module = lua
-            .create_table_from([("ReadJSON", read_json)])
+            .create_table_from([("ReadJSON", read_json), ("Matches", matches)])
             .map_err(|e| eyre!("failed to create table for module: {e}"))?;
         lua.register_module("@checkonaut", module)
             .map_err(|e| eyre!("failed to register checkonaut module: {e}"))?;
