@@ -75,8 +75,8 @@ impl Check {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        ensure!(check_files.len() > 0, "no check files found to run");
-        ensure!(data_files.len() > 0, "no data files found to check");
+        ensure!(!check_files.is_empty(), "no check files found to run");
+        ensure!(!data_files.is_empty(), "no data files found to check");
         // We now have all the Lua files (i.e. checks) and all the data files we want to run on.
 
         #[derive(Debug, Clone)]
@@ -175,7 +175,7 @@ fn check_file(
 fn parse_data(lua: &Lua, path: &Path) -> Result<Vec<mlua::Value>> {
     let contents = std::fs::read(path).wrap_err("failed to read data file")?;
     let ext = path.extension().and_then(|e| e.to_str());
-    if ext.map_or(false, |s| s.eq_ignore_ascii_case("json")) {
+    if ext.is_some_and(|s| s.eq_ignore_ascii_case("json")) {
         // We have a simple JSON document: there is only 1 document per file.
         let value: serde_json::Value =
             serde_json::from_slice(&contents).wrap_err("failed to parse JSON")?;
@@ -184,7 +184,7 @@ fn parse_data(lua: &Lua, path: &Path) -> Result<Vec<mlua::Value>> {
             .map_err(|e| eyre!("failed to serialize JSON to Lua value: {e}"))
             .wrap_err("failed to convert JSON to Lua value")?;
         Ok(vec![value])
-    } else if ext.map_or(false, |s| s.eq_ignore_ascii_case("toml")) {
+    } else if ext.is_some_and(|s| s.eq_ignore_ascii_case("toml")) {
         // We have a simple TOML document: there is only 1 document per file.
         let value: serde_json::Value =
             toml::from_slice(&contents).wrap_err("failed to parse TOML")?;
@@ -193,13 +193,11 @@ fn parse_data(lua: &Lua, path: &Path) -> Result<Vec<mlua::Value>> {
             .map_err(|e| eyre!("failed to serialize TOML to Lua value: {e}"))
             .wrap_err("failed to convert TOML to Lua value")?;
         Ok(vec![value])
-    } else if ext.map_or(false, |s| {
-        s.eq_ignore_ascii_case("yml") || s.eq_ignore_ascii_case("yaml")
-    }) {
+    } else if ext.is_some_and(|s| s.eq_ignore_ascii_case("yml") || s.eq_ignore_ascii_case("yaml")) {
         // We may have multiple YAML documents in a single file.
-        let mut deserializer = serde_norway::Deserializer::from_slice(&contents);
+        let deserializer = serde_norway::Deserializer::from_slice(&contents);
         let mut values = Vec::with_capacity(1);
-        while let Some(de) = deserializer.next() {
+        for de in deserializer {
             let value: serde_json::Value =
                 serde_json::Value::deserialize(de).wrap_err("failed to parse YAML document")?;
             let value = lua

@@ -76,7 +76,7 @@ fn test_file(path: PathBuf) -> Result<Vec<String>> {
         .load_into(&lua)
         .wrap_err("failed to load source code into Lua")?;
 
-    Ok(source
+    source
         .call_test_functions(&lua)
-        .wrap_err("failed to run test functions")?)
+        .wrap_err("failed to run test functions")
 }

@@ -251,7 +251,7 @@ impl CheckResult {
 }
 
 impl FromLua for CheckResult {
-    fn from_lua(value: mlua::Value, lua: &Lua) -> mlua::Result<Self> {
+    fn from_lua(value: mlua::Value, _lua: &Lua) -> mlua::Result<Self> {
         match value {
             mlua::Value::Nil => Ok(CheckResult::Nil),
 
@@ -281,7 +281,7 @@ impl FromLua for CheckResult {
                                 severity: None,
                                 error: s.to_str()?.to_string(),
                             }),
-                            otherwise => results.push(CheckResult::from_lua(otherwise, lua)?),
+                            otherwise => results.push(CheckResult::from_lua(otherwise, _lua)?),
                         }
                     }
                     Ok(Self::Many {
